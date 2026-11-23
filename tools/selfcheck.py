@@ -238,6 +238,145 @@ def main() -> int:
     except InputError as exc:
         check("重复" in str(exc), "duplicate pair rejected")
 
+    section("8. Original-photo packages")
+    import io
+    import tempfile
+    import zipfile
+
+    from app.photos import PackageError, parse_photo_package
+
+    def jpeg(tag: str) -> bytes:
+        return b"\xff\xd8\xff\xe0" + tag.encode()
+
+    def make_zip(files, csv_text):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("manifest.csv", csv_text)
+            for name, data in files.items():
+                archive.writestr(name, data)
+        return buf.getvalue()
+
+    good = make_zip(
+        {"A1.jpg": jpeg("a1"), "A2.jpg": jpeg("a2")},
+        "编号,文件名\nA1,A1.jpg\nA2,A2.jpg\n",
+    )
+    photos = parse_photo_package(good, ["A1", "A2"], "第一轮")
+    check(
+        [p.photo_id for p in photos] == ["A1", "A2"]
+        and photos[0].data == jpeg("a1"),
+        "valid package parses with exact bytes",
+    )
+
+    def rejects(raw, needle, label):
+        try:
+            parse_photo_package(raw, ["A1", "A2"], "第一轮")
+        except PackageError as exc:
+            check(needle in str(exc), label, str(exc))
+        else:
+            check(False, label, "no error raised")
+
+    rejects(
+        make_zip({"A1.jpg": jpeg("a1")}, "A1,A1.jpg\nA2,A1.jpg\n"),
+        "配给了多",
+        "one file for two IDs rejected",
+    )
+    rejects(
+        make_zip(
+            {"A1.jpg": jpeg("a1"), "A2.jpg": jpeg("a2"), "x.jpg": jpeg("x")},
+            "A1,A1.jpg\nA2,A2.jpg\n",
+        ),
+        "未在清单",
+        "unlisted file rejected",
+    )
+    rejects(
+        make_zip({"A1.jpg": jpeg("a1")}, "A1,A1.jpg\n"),
+        "缺少",
+        "missing round ID rejected",
+    )
+    rejects(
+        make_zip(
+            {"A1.jpg": b"PNG", "A2.jpg": jpeg("a2")},
+            "A1,A1.jpg\nA2,A2.jpg\n",
+        ),
+        "JPEG",
+        "non-JPEG rejected",
+    )
+    rejects(
+        make_zip(
+            {"A1.jpg": b"\xff\xd8\xff" + b"x" * (20 * 1024 * 1024),
+             "A2.jpg": jpeg("a2")},
+            "A1,A1.jpg\nA2,A2.jpg\n",
+        ),
+        "20 MB",
+        "over 20 MB rejected",
+    )
+
+    # End-to-end storage rules with a throwaway database.
+    old_db = os.environ.get("SEAL_DB_PATH")
+    os.environ["SEAL_DB_PATH"] = os.path.join(
+        tempfile.mkdtemp(prefix="seal-photo-selfcheck-"), "photos.db"
+    )
+    try:
+        db.init_db()
+        survey = Dataset.from_raw(
+            ["A1", "A2"], ["B1", "B2"], [("A1", "B1"), ("A2", "B2")]
+        )
+        sid = db.create_survey(survey, "photos")
+        pkg = parse_photo_package(good, ["A1", "A2"], "第一轮")
+        db.save_photo_package(sid, 1, pkg)
+        tokens = db.candidate_tokens(sid)
+        db.apply_verdict_batch(sid, [("A1", "B1", "same")], tokens)
+        check(
+            db.load_dataset(sid).verdicts.same == {("A1", "B1")},
+            "verdict accepted against shown originals",
+        )
+
+        changed = parse_photo_package(
+            make_zip(
+                {"A1.jpg": jpeg("new"), "A2.jpg": jpeg("a2")},
+                "A1,A1.jpg\nA2,A2.jpg\n",
+            ),
+            ["A1", "A2"],
+            "第一轮",
+        )
+        try:
+            db.save_photo_package(sid, 1, changed)
+        except db.PhotoConflictError as exc:
+            check("A1" in str(exc), "protected original swap rejected")
+        else:
+            check(False, "protected original swap rejected")
+        served, _ = db.photo_bytes(sid, 1, "A1")
+        check(served == jpeg("a1"), "originals kept after rejected swap")
+
+        add_round2 = parse_photo_package(
+            make_zip(
+                {"B1.jpg": jpeg("b1"), "B2.jpg": jpeg("b2")},
+                "B1,B1.jpg\nB2,B2.jpg\n",
+            ),
+            ["B1", "B2"],
+            "第二轮",
+        )
+        db.save_photo_package(sid, 2, add_round2)
+        stale = dict(tokens)
+        try:
+            db.apply_verdict_batch(sid, [("A2", "B2", "diff")], stale)
+        except db.PhotoConflictError as exc:
+            check("刷新" in str(exc), "stale page rejected after originals added")
+        else:
+            check(False, "stale page rejected after originals added")
+
+        fresh = db.candidate_tokens(sid)
+        db.apply_verdict_batch(sid, [("A2", "B2", "diff")], fresh)
+        check(
+            db.load_dataset(sid).verdicts.diff == {("A2", "B2")},
+            "fresh page accepted after refresh",
+        )
+    finally:
+        if old_db is None:
+            os.environ.pop("SEAL_DB_PATH", None)
+        else:
+            os.environ["SEAL_DB_PATH"] = old_db
+
     print()
     if FAILURES:
         print(f"FAILED: {len(FAILURES)} check(s): {FAILURES}")

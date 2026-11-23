@@ -37,6 +37,41 @@ SEAL_DB_PATH=./seals.db python3 -m uvicorn app.main:app --port 8000
 `第一轮编号,第二轮编号`（也接受 Tab、空格、`->`）。可直接粘贴或上传文本文件
 （UTF-8 / GB18030）。编号允许字母、数字与 `_ . : / -`。
 
+## 按轮上传原片包
+
+创建调查后，在核对页按轮各上传一个 ZIP（第一轮、第二轮分开）。ZIP 内：
+
+- 一个两列 CSV 清单 `编号,文件名`（可带表头，UTF-8 / GB18030）；
+- 清单引用的 JPEG 原片文件。
+
+规则（任何一条不满足则**整包退回**，已存原片不变）：
+
+| 检查 | 说明 |
+|---|---|
+| 编号覆盖 | 本轮每个编号在清单中恰好出现一次，且不能出现本轮之外的编号 |
+| 文件唯一 | 同一文件只能配给一个编号；清单里引用的文件必须存在于 ZIP |
+| 无多余文件 | ZIP 内除 CSV 外不得有其他未列入清单的文件（`.DS_Store` 等系统文件忽略） |
+| 真 JPEG | 按魔数 `FF D8 FF` 判定，扩展名不作数 |
+| 合计大小 | 解包后照片合计 ≤ 20 MB；请求体上限 40 MB，ZIP 上限 24 MB |
+
+每个编号在当前轮只绑定一张原片。重交整轮原片即“换包”，整轮原子替换；
+换包与提交核对都走 SQLite `BEGIN IMMEDIATE`，按入库先后生效。
+
+**受保护原片**：一个编号若已绑定原片、且已有存下的核对结论，则新包中它的照片
+字节（SHA-256）必须一致；被更换则整包退回并保留原片。核对结论不会因换包被
+静默删除或改写。
+
+**提交以页面所取原片为依据**：页面为每对候选写入两个编号当前原片的版本令牌
+（由 SHA-256 截断得到）。提交时在写事务内比对令牌：
+
+- 本批任一所选候选的原片已增加或更换 → **整批退回**，提示刷新，什么都不写；
+- 只有未被选中的编号换了原片 → 仍可提交；
+- 没有原片的旧调查（历史数据）页面令牌为“无原片”，只要这批编号仍未绑定原片
+  就照常可核对；一旦其中某个编号补传了原片，旧页面会被退回要求刷新。
+
+点候选行的编号或缩略图会并排显示两张原片（原图链接按版本固定，原片被换后旧
+链接返回 409，页面不会静默显示另一张照片）。
+
 ## 估计方法
 
 n1、n2 为两轮去重编号数，m 为“两轮都拍到”的个体数（合法匹配的大小）：
@@ -75,8 +110,11 @@ N̂ 关于 m 严格递减，因此**在所有合法配对下**的上下界只取
 
 - `GET /` 首页（新建 + 样例 + 已有调查）
 - `POST /surveys` 创建调查
-- `GET /surveys/{id}` 核对页（估计、推荐、候选表、试算明细、已存结论）
-- `POST /surveys/{id}/verdicts` 提交结论（表单字段 `verdict__<候选下标>`）
+- `GET /surveys/{id}` 核对页（估计、推荐、候选表、原片包上传、试算明细、已存结论）
+- `POST /surveys/{id}/photos/{1|2}` 上传/更换该轮原片包（multipart 字段 `package`）
+- `GET /surveys/{id}/photos/{1|2}/{编号}?v=<版本>` 取一张原片；`v` 不匹配返回 409
+- `POST /surveys/{id}/verdicts` 提交结论（表单字段 `verdict__<候选下标>`、
+  `token__<候选下标>`：页面原片版本令牌）
 - `GET /api/surveys/{id}` JSON：`estimate` 与 `recommendation.trials/best`
 - `GET /healthz` 健康检查
 
@@ -84,18 +122,19 @@ N̂ 关于 m 严格递减，因此**在所有合法配对下**的上下界只取
 
 ```
 app/model.py     纯领域逻辑：校验、冲突规则、Hopcroft–Karp、Chapman、试算与推荐
-app/db.py        SQLite（surveys / candidates / verdicts），事务化结论写入
+app/photos.py    原片包解析与校验（清单、JPEG 判定、20 MB 上限、版本令牌）
+app/db.py        SQLite（surveys / candidates / verdicts / photos / photo_packages）
 app/main.py      FastAPI 路由与表单解析
-app/templates/   Jinja2 页面
+app/templates/   Jinja2 页面（含原片并排比对）
 samples/         网页可试用样例数据
-tests/           pytest（领域 + HTTP）
+tests/           pytest（领域 + HTTP + 原片包）
 tools/selfcheck.py  收尾自测脚本（争用、冲突、边界、样例、输入上限）
 ```
 
 ## 自测
 
 ```bash
-python3 -m pytest          # 29 个测试
+python3 -m pytest          # 42 个测试
 python3 tools/selfcheck.py # 打印逐项 PASS/FAIL
 ```
 

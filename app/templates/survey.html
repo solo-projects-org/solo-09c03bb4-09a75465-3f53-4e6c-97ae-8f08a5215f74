@@ -20,6 +20,69 @@
     <a class="btn ghost" href="/">返回</a>
   </div>
 
+  <div class="photo-status">
+    {% for round_no, label, round_ids, bound in [(1, '第一轮', survey.round1, photo1), (2, '第二轮', survey.round2, photo2)] %}
+      <div class="photo-round">
+        <span class="tag {{ 'same' if bound|length == round_ids|length else 'open' }}">
+          {{ label }}原片
+        </span>
+        {% if bound %}
+          {{ bound|length }}/{{ round_ids|length }} 个编号已绑定 ·
+          合计 {{ '%.2f'|format(bound.values() | map(attribute='size') | sum / 1024 / 1024) }} MB
+        {% else %}
+          尚未上传
+        {% endif %}
+      </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="card" id="photo-packages">
+  <h2>按轮上传原片包</h2>
+  <p class="hint">
+    每轮上传一个 ZIP，内含 JPEG 原片与一个两列 CSV 清单（<code>编号,文件名</code>）。
+    本轮每个编号须恰好配一张照片，同一文件只能配一个编号；解包后照片合计最多
+    {{ max_photo_mb }} MB。清单不符时整包退回。
+  </p>
+  <p class="hint">
+    换包规则：已绑定原片且已有核对结论的编号，照片字节必须一致，否则整包退回并保留原片；
+    换包与核对按入库先后生效。新包会替换该轮原有原片。
+  </p>
+  <div class="package-forms">
+    {% for round_no, label, bound in [(1, '第一轮', photo1), (2, '第二轮', photo2)] %}
+    <form method="post" action="/surveys/{{ survey.id }}/photos/{{ round_no }}"
+          enctype="multipart/form-data" class="package-form">
+      <strong>{{ label }}原片包</strong>
+      <span class="hint">
+        {% if bound %}当前 {{ bound|length }} 张已绑定{% else %}当前未绑定原片{% endif %}
+      </span>
+      <input type="file" name="package" accept=".zip,application/zip" required>
+      <button class="btn primary" type="submit">
+        {{ '换包' if bound else '上传并校验' }}
+      </button>
+    </form>
+    {% endfor %}
+  </div>
+  {% if packages %}
+  <details class="package-log">
+    <summary>原片包入库记录（{{ packages|length }}）</summary>
+    <table class="table">
+      <thead><tr><th>轮次</th><th>入库时间</th><th>照片数</th><th>合计大小</th></tr></thead>
+      <tbody>
+        {% for p in packages %}
+        <tr>
+          <td>第{{ '一' if p.round == 1 else '二' }}轮</td>
+          <td class="mono small">{{ p.created_at }}</td>
+          <td>{{ p.photo_count }}</td>
+          <td>{{ '%.2f'|format(p.total_bytes / 1024 / 1024) }} MB</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+</section>
+
   <div class="estimate-box">
     <h2>Chapman 估计（所有合法配对）</h2>
     <div class="metrics">
@@ -98,12 +161,14 @@
   <p class="hint">
     每个编号最多配一次。核实为同一只的必须配对，核实为两只的排除，其余候选可配可不配。
     已保存的结论不可改判；与已有结论冲突的提交会被整批拒绝，原结论与估计结果保留。
+    点编号或缩略图可并排看两张原片；提交须以页面所取的原片为依据。
   </p>
   <form method="post" action="/surveys/{{ survey.id }}/verdicts" id="verdict-form">
     <table class="table verdict-table">
       <thead>
         <tr>
           <th>#</th><th>第一轮</th><th>第二轮</th>
+          <th>原片（并排比对）</th>
           <th>判同一只</th><th>判两只</th><th>状态</th>
         </tr>
       </thead>
@@ -111,10 +176,47 @@
       {% for c in dataset.candidates %}
         {% set v = dataset.verdicts.verdict_for(c.key) %}
         {% set can_match = c.key in matchable_keys %}
-        <tr class="{{ 'row-best' if c.key in best_keys else '' }}">
-          <td>{{ loop.index }}</td>
-          <td class="mono">{{ c.round1_id }}</td>
-          <td class="mono">{{ c.round2_id }}</td>
+        {% set p1 = photo1.get(c.round1_id) %}
+        {% set p2 = photo2.get(c.round2_id) %}
+        <tr class="{{ 'row-best' if c.key in best_keys else '' }}"
+            data-r1="{{ c.round1_id }}" data-r2="{{ c.round2_id }}"
+            {% if p1 %}data-v1="{{ p1.sha256[:16] }}"{% endif %}
+            {% if p2 %}data-v2="{{ p2.sha256[:16] }}"{% endif %}>
+          <td>{{ loop.index }}
+            <input type="hidden" name="token__{{ loop.index0 }}"
+                   value="{{ photo_tokens[c.key] }}">
+          </td>
+          <td class="mono">
+            {% if p1 %}
+              <a class="photo-link" data-compare target="_blank" rel="noopener"
+                 href="/surveys/{{ survey.id }}/photos/1/{{ c.round1_id }}?v={{ p1.sha256[:16] }}"
+                 aria-label="并排查看 {{ c.round1_id }} 与 {{ c.round2_id }} 的原片">{{ c.round1_id }}</a>
+            {% else %}{{ c.round1_id }}{% endif %}
+          </td>
+          <td class="mono">
+            {% if p2 %}
+              <a class="photo-link" data-compare target="_blank" rel="noopener"
+                 href="/surveys/{{ survey.id }}/photos/2/{{ c.round2_id }}?v={{ p2.sha256[:16] }}"
+                 aria-label="并排查看 {{ c.round1_id }} 与 {{ c.round2_id }} 的原片">{{ c.round2_id }}</a>
+            {% else %}{{ c.round2_id }}{% endif %}
+          </td>
+          <td class="photo-cell">
+            <div class="thumb-pair">
+              {% for photo, pid, rnd in [(p1, c.round1_id, 1), (p2, c.round2_id, 2)] %}
+                {% if photo %}
+                  <a class="thumb-btn" data-compare target="_blank" rel="noopener"
+                     href="/surveys/{{ survey.id }}/photos/{{ rnd }}/{{ pid }}?v={{ photo.sha256[:16] }}"
+                     aria-label="并排查看 {{ c.round1_id }} 与 {{ c.round2_id }} 的原片">
+                    <img class="thumb" loading="lazy"
+                         src="/surveys/{{ survey.id }}/photos/{{ rnd }}/{{ pid }}?v={{ photo.sha256[:16] }}"
+                         alt="{{ pid }} 原片缩略图">
+                  </a>
+                {% else %}
+                  <span class="thumb missing" aria-label="{{ pid }} 原片未上传">无原片<br><span class="mono small">{{ pid }}</span></span>
+                {% endif %}
+              {% endfor %}
+            </div>
+          </td>
           <td>
             {% if v == 'open' and can_match %}
               <input type="radio" name="verdict__{{ loop.index0 }}" value="same"
@@ -141,10 +243,35 @@
     </table>
     <div class="actions">
       <button class="btn primary" type="submit">提交核对结论并刷新</button>
+      <button class="btn ghost" type="reset">清除勾选</button>
       <span class="hint">可一次勾选多对；未勾选的对保持待核。</span>
     </div>
   </form>
 </section>
+
+<div class="lightbox" id="compare" hidden aria-hidden="true" role="dialog"
+     aria-label="并排比对两张原片">
+  <div class="lightbox-inner">
+    <div class="lightbox-head">
+      <strong id="compare-title">原片并排比对</strong>
+      <button type="button" class="btn ghost" id="compare-close">关闭</button>
+    </div>
+    <div class="compare-pair">
+      <figure>
+        <a id="compare-a-link" target="_blank" rel="noopener">
+          <img id="compare-a" alt="第一轮原片">
+        </a>
+        <figcaption class="mono" id="compare-a-cap"></figcaption>
+      </figure>
+      <figure>
+        <a id="compare-b-link" target="_blank" rel="noopener">
+          <img id="compare-b" alt="第二轮原片">
+        </a>
+        <figcaption class="mono" id="compare-b-cap"></figcaption>
+      </figure>
+    </div>
+  </div>
+</div>
 
 {% if rec.trials %}
 <section class="card">
@@ -202,4 +329,72 @@
   <p class="hint">尚未保存任何核对结论。</p>
   {% endif %}
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const box = document.getElementById('compare');
+  if (!box) return;
+  const imgA = document.getElementById('compare-a');
+  const imgB = document.getElementById('compare-b');
+  const linkA = document.getElementById('compare-a-link');
+  const linkB = document.getElementById('compare-b-link');
+  const capA = document.getElementById('compare-a-cap');
+  const capB = document.getElementById('compare-b-cap');
+  const title = document.getElementById('compare-title');
+  const base = {{ ('/surveys/%d/photos/' % survey.id) | tojson }};
+
+  function photoSrc(row, roundNo, photoId, version) {
+    return base + roundNo + '/' + encodeURIComponent(photoId) + '?v=' + version;
+  }
+
+  function open(row) {
+    const r1 = row.dataset.r1, r2 = row.dataset.r2;
+    const v1 = row.dataset.v1, v2 = row.dataset.v2;
+    title.textContent = r1 + '  ↔  ' + r2 + ' · 原片并排比对';
+    const hasA = !!v1, hasB = !!v2;
+    [imgA, imgB].forEach(function (img) { img.removeAttribute('src'); });
+    capA.textContent = hasA ? ('第一轮 ' + r1) : ('第一轮 ' + r1 + '：原片未上传');
+    capB.textContent = hasB ? ('第二轮 ' + r2) : ('第二轮 ' + r2 + '：原片未上传');
+    if (hasA) {
+      const src = photoSrc(row, 1, r1, v1);
+      imgA.src = src; imgA.alt = '第一轮 ' + r1 + ' 原片';
+      linkA.href = src;
+    } else { imgA.alt = '第一轮原片未上传'; linkA.removeAttribute('href'); }
+    if (hasB) {
+      const src = photoSrc(row, 2, r2, v2);
+      imgB.src = src; imgB.alt = '第二轮 ' + r2 + ' 原片';
+      linkB.href = src;
+    } else { imgB.alt = '第二轮原片未上传'; linkB.removeAttribute('href'); }
+    box.hidden = false;
+    box.setAttribute('aria-hidden', 'false');
+    document.getElementById('compare-close').focus();
+  }
+
+  function close() {
+    box.hidden = true;
+    box.setAttribute('aria-hidden', 'true');
+  }
+
+  document.querySelectorAll('[data-compare]').forEach(function (el) {
+    el.addEventListener('click', function (ev) {
+      // Ctrl/Cmd/Shift/middle click keeps the normal "open photo in a new
+      // tab" behaviour of the link.
+      if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return;
+      const row = el.closest('tr');
+      if (!row) return;
+      // Progressive enhancement: the links open the photo directly when
+      // JavaScript is unavailable; with the dialog we open the pair instead.
+      ev.preventDefault();
+      open(row);
+    });
+  });
+  document.getElementById('compare-close').addEventListener('click', close);
+  box.addEventListener('click', function (ev) { if (ev.target === box) close(); });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && !box.hidden) close();
+  });
+})();
+</script>
 {% endblock %}
