@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}海豹照片重捕核对{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">🦭 海豹照片重捕核对</a>
+  <nav>
+    <a href="/">新建 / 调查列表</a>
+  </nav>
+</header>
+<main>
+  {% if notice %}<div class="flash ok">{{ notice }}</div>{% endif %}
+  {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+<footer class="foot">
+  两轮闭种群照片重捕 · Chapman 估计 · 结论存 SQLite
+</footer>
+{% block scripts %}{% endblock %}
+</body>
+</html>

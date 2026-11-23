@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+{% block title %}{{ survey.name }} · 海豹照片重捕核对{% endblock %}
+{% block content %}
+{% set est = analysis.estimate %}
+{% set rec = analysis.recommendation %}
+{% set best_keys = rec.best | map(attribute='candidate') | map(attribute='key') | list %}
+{% set matchable_keys = dataset.matchable_open_candidates() | map(attribute='key') | list %}
+
+<section class="card">
+  <div class="title-row">
+    <div>
+      <h1>{{ survey.name }}</h1>
+      <p class="hint mono small">
+        调查 #{{ survey.id }} · 创建 {{ survey.created_at }} ·
+        第一轮 {{ survey.round1|length }} 个编号 · 第二轮 {{ survey.round2|length }} 个编号 ·
+        候选 {{ survey.candidate_count }} 对 · 已核实 {{ survey.same_count }} 对同一只 /
+        {{ survey.diff_count }} 对两只
+      </p>
+    </div>
+    <a class="btn ghost" href="/">返回</a>
+  </div>
+
+  <div class="estimate-box">
+    <h2>Chapman 估计（所有合法配对）</h2>
+    <div class="metrics">
+      <div class="metric">
+        <span class="k">种群量区间</span>
+        <span class="v">{{ est.n_low|round(2) }} ～ {{ est.n_high|round(2) }}</span>
+      </div>
+      <div class="metric">
+        <span class="k">可实现的配对只数 m</span>
+        <span class="v">{{ est.m_min }} ～ {{ est.m_max }}</span>
+      </div>
+      <div class="metric">
+        <span class="k">区间宽度</span>
+        <span class="v">{{ est.width|round(2) }}</span>
+      </div>
+      <div class="metric">
+        <span class="k">公式</span>
+        <span class="v mono">N = ({{ est.n1 }}+1)({{ est.n2 }}+1)/(m+1) − 1</span>
+      </div>
+    </div>
+    {% if not est.intervals_possible %}
+      <p class="hint">当前所有合法配对的 m 相同，估计为点值，不再有区间。</p>
+    {% endif %}
+    {% if est.m_min == 0 %}
+      <p class="hint">
+        注意：m 可以取到 0，此时 Chapman 公式的分母为 1，上界对重捕数很敏感；
+        建议优先核实能锁定配对数的候选。
+      </p>
+    {% endif %}
+    {% if analysis.open_count == 0 %}
+      <p class="hint">所有候选都已核实，估计结果不再随核对而变化。</p>
+    {% endif %}
+  </div>
+
+  <div class="rec-box">
+    <h2>下一步该比对哪两张照片</h2>
+    {% if rec.best %}
+      {% for t in rec.best %}
+        <div class="rec-pair">
+          <span class="badge">推荐</span>
+          <strong class="mono">{{ t.candidate.round1_id }}</strong>
+          ↔
+          <strong class="mono">{{ t.candidate.round2_id }}</strong>
+          <div class="hint">
+            判为同一只 → 区间 {{ t.same.n_low|round(2) }}～{{ t.same.n_high|round(2) }}
+            （宽 {{ t.same_width|round(2) }}，m {{ t.same.m_min }}～{{ t.same.m_max }}）<br>
+            判为两只 → 区间 {{ t.diff.n_low|round(2) }}～{{ t.diff.n_high|round(2) }}
+            （宽 {{ t.diff_width|round(2) }}，m {{ t.diff.m_min }}～{{ t.diff.m_max }}）<br>
+            两种结果取较宽者：<strong>{{ t.effective_width|round(2) }}</strong>
+          </div>
+        </div>
+      {% endfor %}
+      {% if rec.best|length > 1 %}
+        <p class="hint">有 {{ rec.best|length }} 对并列最优，可任选其一先核对。</p>
+      {% endif %}
+    {% elif analysis.open_count == 0 %}
+      <p class="hint">没有待核候选了：所有候选均已核实。</p>
+    {% elif rec.considered == 0 %}
+      <p class="hint">
+        还有 {{ analysis.open_count }} 对候选未核实，但它们的编号都已被“同一只”结论占用，
+        已不可能再配上，因此不会再影响估计；可继续在下方查看或排除。
+      </p>
+    {% else %}
+      <p class="hint">没有仍可配上的待核候选。</p>
+    {% endif %}
+    <p class="hint">
+      规则：对每个仍可配上的待核候选，分别试算「判为同一只」和「判为两只」时的估计区间，
+      取两者中较宽者为该候选的决策宽度，推荐决策宽度最小的一对。
+      当前共试算 {{ rec.considered }} 个仍可配上的待核候选，待核合计 {{ analysis.open_count }} 对。
+    </p>
+  </div>
+</section>
+
+<section class="card">
+  <h2>候选核对（待核 {{ analysis.open_count }} 对）</h2>
+  <p class="hint">
+    每个编号最多配一次。核实为同一只的必须配对，核实为两只的排除，其余候选可配可不配。
+    已保存的结论不可改判；与已有结论冲突的提交会被整批拒绝，原结论与估计结果保留。
+  </p>
+  <form method="post" action="/surveys/{{ survey.id }}/verdicts" id="verdict-form">
+    <table class="table verdict-table">
+      <thead>
+        <tr>
+          <th>#</th><th>第一轮</th><th>第二轮</th>
+          <th>判同一只</th><th>判两只</th><th>状态</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for c in dataset.candidates %}
+        {% set v = dataset.verdicts.verdict_for(c.key) %}
+        {% set can_match = c.key in matchable_keys %}
+        <tr class="{{ 'row-best' if c.key in best_keys else '' }}">
+          <td>{{ loop.index }}</td>
+          <td class="mono">{{ c.round1_id }}</td>
+          <td class="mono">{{ c.round2_id }}</td>
+          <td>
+            {% if v == 'open' and can_match %}
+              <input type="radio" name="verdict__{{ loop.index0 }}" value="same"
+                     aria-label="判 {{ c.round1_id }} 与 {{ c.round2_id }} 为同一只">
+            {% elif v == 'open' %}
+              <span class="hint" title="编号已被其他「同一只」结论占用">不可配</span>
+            {% else %}—{% endif %}
+          </td>
+          <td>
+            {% if v == 'open' %}
+              <input type="radio" name="verdict__{{ loop.index0 }}" value="diff"
+                     aria-label="判 {{ c.round1_id }} 与 {{ c.round2_id }} 为两只">
+            {% else %}—{% endif %}
+          </td>
+          <td>
+            {% if v == 'same' %}<span class="tag same">同一只</span>
+            {% elif v == 'diff' %}<span class="tag diff">两只</span>
+            {% elif can_match %}<span class="tag open">待核对</span>
+            {% else %}<span class="tag open">待核对（不可再配）</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <div class="actions">
+      <button class="btn primary" type="submit">提交核对结论并刷新</button>
+      <span class="hint">可一次勾选多对；未勾选的对保持待核。</span>
+    </div>
+  </form>
+</section>
+
+{% if rec.trials %}
+<section class="card">
+  <h2>仍可配上的待核候选试算明细</h2>
+  <p class="hint">按决策宽度（两种结果中较宽者）升序排列，最上面即推荐。</p>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>候选</th>
+        <th>判同一只 m</th>
+        <th>判同一只 N 区间</th>
+        <th>宽</th>
+        <th>判两只 m</th>
+        <th>判两只 N 区间</th>
+        <th>宽</th>
+        <th>决策宽度</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in rec.trials|sort(attribute='effective_width') %}
+      <tr class="{{ 'row-best' if t.candidate.key in best_keys else '' }}">
+        <td class="mono">{{ t.candidate.round1_id }} ↔ {{ t.candidate.round2_id }}</td>
+        <td>{{ t.same.m_min }}–{{ t.same.m_max }}</td>
+        <td>{{ t.same.n_low|round(2) }}–{{ t.same.n_high|round(2) }}</td>
+        <td>{{ t.same_width|round(2) }}</td>
+        <td>{{ t.diff.m_min }}–{{ t.diff.m_max }}</td>
+        <td>{{ t.diff.n_low|round(2) }}–{{ t.diff.n_high|round(2) }}</td>
+        <td>{{ t.diff_width|round(2) }}</td>
+        <td><strong>{{ t.effective_width|round(2) }}</strong></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>已保存的核对结论（{{ verdict_rows|length }}）</h2>
+  {% if verdict_rows %}
+  <table class="table">
+    <thead><tr><th>第一轮</th><th>第二轮</th><th>结论</th><th>保存时间</th></tr></thead>
+    <tbody>
+      {% for r in verdict_rows %}
+      <tr>
+        <td class="mono">{{ r.round1_id }}</td>
+        <td class="mono">{{ r.round2_id }}</td>
+        <td>{% if r.verdict == 'same' %}<span class="tag same">同一只</span>
+            {% else %}<span class="tag diff">两只</span>{% endif %}</td>
+        <td class="mono small">{{ r.updated_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="hint">尚未保存任何核对结论。</p>
+  {% endif %}
+</section>
+{% endblock %}

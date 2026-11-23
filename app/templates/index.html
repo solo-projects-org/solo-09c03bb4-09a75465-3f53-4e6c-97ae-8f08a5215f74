@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h1>新建调查</h1>
+  <p class="hint">
+    上传或粘贴同一调查区两轮各自去重后的编号清单（每轮最多 {{ max_ids }} 个编号），
+    以及跨轮疑似同只的编号对（最多 {{ max_pairs }} 对）。每行一个编号；疑似对每行
+    <code>第一轮编号,第二轮编号</code>。编号只允许字母、数字与 <code>_ . : / -</code>。
+  </p>
+
+  <div class="samples">
+    <strong>网页试用样例：</strong>
+    <a class="btn ghost" href="/samples/small">载入 小样（12+11 只，6 对候选）</a>
+    <a class="btn ghost" href="/samples/medium">载入 中样（40+38 只，20 对候选）</a>
+  </div>
+
+  <form method="post" action="/surveys" enctype="multipart/form-data" id="create-form">
+    <label class="field">
+      <span>调查名称</span>
+      <input type="text" name="name" value="{{ (form.name if form else '') }}"
+             placeholder="例如：2026 春 西滩样区">
+    </label>
+
+    <div class="grid2">
+      <label class="field">
+        <span>第一轮编号清单（已去重）</span>
+        <textarea name="round1_text" rows="10" placeholder="B01&#10;B02&#10;...">{{ form.round1_text if form else '' }}</textarea>
+      </label>
+      <label class="field">
+        <span>第二轮编号清单（已去重）</span>
+        <textarea name="round2_text" rows="10" placeholder="C01&#10;C02&#10;...">{{ form.round2_text if form else '' }}</textarea>
+      </label>
+    </div>
+
+    <label class="field">
+      <span>跨轮疑似同只的编号对（每行一对）</span>
+      <textarea name="pairs_text" rows="10" placeholder="B01,C04&#10;B03,C11&#10;...">{{ form.pairs_text if form else '' }}</textarea>
+    </label>
+
+    <p class="hint">
+      也可以直接上传文本文件（UTF-8 或 GB18030，每行一条），上传内容优先于文本框：
+    </p>
+    <div class="upload-row">
+      <label>第一轮清单 <input type="file" name="round1_file" accept=".txt,.csv,text/plain"></label>
+      <label>第二轮清单 <input type="file" name="round2_file" accept=".txt,.csv,text/plain"></label>
+      <label>疑似对 <input type="file" name="pairs_file" accept=".txt,.csv,text/plain"></label>
+    </div>
+
+    <div class="actions">
+      <button class="btn primary" type="submit">创建调查并开始核对</button>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>已有调查</h2>
+  {% if surveys %}
+  <table class="table">
+    <thead>
+      <tr><th>#</th><th>名称</th><th>候选对</th><th>已核对</th><th>创建时间</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for s in surveys %}
+      <tr>
+        <td>{{ s.id }}</td>
+        <td>{{ s.name }}</td>
+        <td>{{ s.candidate_count }}</td>
+        <td>{{ s.verdict_count }}</td>
+        <td class="mono small">{{ s.created_at }}</td>
+        <td><a class="btn ghost" href="/surveys/{{ s.id }}">打开</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="hint">还没有调查记录。</p>
+  {% endif %}
+</section>
+{% endblock %}
